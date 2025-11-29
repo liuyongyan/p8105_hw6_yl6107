@@ -1,0 +1,105 @@
+---
+title: "Homework 6"
+author: "Yongyan Liu (yl6107)"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(broom)
+
+knitr::opts_chunk$set(
+  fig.width = 8,
+  fig.height = 6
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+## Problem 1
+
+### Data Loading and Cleaning
+
+Load the Washington Post homicide data, filter to valid numeric ages and White/Black victims, exclude certain cities with data issues, and create variables for city-state identifier and case resolution status.
+
+```{r load_homicide_data}
+homicide_df =
+  read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv", show_col_types = FALSE) |>
+  filter(str_detect(victim_age, "^[0-9]+$")) |>
+  mutate(
+    city_state = str_c(city, ", ", state),
+    solved = ifelse(disposition == "Closed by arrest", 1, 0),
+    victim_age = as.numeric(victim_age)
+  ) |>
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+    victim_race %in% c("White", "Black")
+  )
+```
+
+### Baltimore, MD Analysis
+
+Fit a logistic regression model for Baltimore with resolved vs. unresolved as the outcome and victim age, sex, and race as predictors.
+
+```{r baltimore_glm}
+baltimore_df =
+  homicide_df |>
+  filter(city_state == "Baltimore, MD")
+
+baltimore_glm =
+  glm(solved ~ victim_age + victim_sex + victim_race,
+      data = baltimore_df,
+      family = binomial())
+
+baltimore_glm |>
+  tidy(conf.int = TRUE, exponentiate = TRUE) |>
+  filter(term == "victim_sexMale") |>
+  select(term, estimate, conf.low, conf.high) |>
+  knitr::kable(digits = 3)
+```
+
+The adjusted odds ratio for solving homicides comparing male victims to female victims is 0.426 (95% CI: 0.325, 0.558), keeping all other variables fixed. This means male victims have approximately 57% lower odds of their case being solved compared to female victims.
+
+### All Cities Analysis
+
+Run logistic regression for each city and extract the adjusted OR and CI for male vs. female victims.
+
+```{r all_cities_glm, fig.width = 10, fig.height = 8}
+city_glm_results =
+  homicide_df |>
+  nest(data = -city_state) |>
+  mutate(
+    model = map(data, \(df) glm(solved ~ victim_age + victim_sex + victim_race,
+                                 data = df, family = binomial())),
+    results = map(model, \(x) tidy(x, conf.int = TRUE, exponentiate = TRUE))
+  ) |>
+  select(city_state, results) |>
+  unnest(results) |>
+  filter(term == "victim_sexMale") |>
+  select(city_state, estimate, conf.low, conf.high)
+
+city_glm_results |>
+  mutate(city_state = fct_reorder(city_state, estimate)) |>
+  ggplot(aes(x = city_state, y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(
+    title = "Adjusted OR for Solving Homicides: Male vs. Female Victims",
+    x = "City",
+    y = "Adjusted Odds Ratio (95% CI)",
+    caption = "Reference line at OR = 1 (no difference)"
+  )
+```
+
+**Interpretation:** The plot shows the adjusted odds ratios comparing the resolution of homicides for male victims versus female victims across cities. Most cities have ORs below 1, indicating that homicides with male victims are less likely to be solved than those with female victims, after adjusting for victim age and race. New York, NY appears to have one of the lowest ORs, while some cities like Albuquerque, NM have ORs that include 1 in their confidence intervals, suggesting no significant difference by victim sex in those locations. The wide confidence intervals in some cities reflect smaller sample sizes or greater variability.
+
+**Note:** Three cities produced warnings about fitted probabilities being numerically 0 or 1 during confidence interval calculation (profile likelihood). This occurs when the algorithm tests extreme parameter values while profiling the likelihood to find CI bounds. The affected cities are:
+
+- Albuquerque, NM (OR: 1.77, 95% CI: 0.83–3.76)
+- Pittsburgh, PA (OR: 0.43, 95% CI: 0.26–0.70)
+- Sacramento, CA (OR: 0.67, 95% CI: 0.33–1.31)
+
+These warnings do not affect the validity of the results. All estimates and confidence intervals are finite, properly bounded, and interpretable. The warnings simply indicate numerical boundary conditions encountered during the iterative CI calculation process, not problems with the final estimates.
