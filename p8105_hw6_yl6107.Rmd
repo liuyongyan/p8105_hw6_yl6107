@@ -103,3 +103,112 @@ city_glm_results |>
 - Sacramento, CA (OR: 0.67, 95% CI: 0.33–1.31)
 
 These warnings do not affect the validity of the results. All estimates and confidence intervals are finite, properly bounded, and interpretable. The warnings simply indicate numerical boundary conditions encountered during the iterative CI calculation process, not problems with the final estimates.
+
+## Problem 2
+
+### Data Loading
+
+Load the Central Park weather data from the `p8105.datasets` package and fit a simple linear regression with `tmax` as the response and `tmin` and `prcp` as predictors.
+
+```{r weather_data}
+library(p8105.datasets)
+
+data("ny_noaa")
+
+weather_df =
+  ny_noaa |>
+  filter(id == "USW00094728") |>
+  drop_na(tmax, tmin, prcp) |>
+  mutate(
+    tmax = as.numeric(tmax) / 10,
+    tmin = as.numeric(tmin) / 10,
+    prcp = prcp / 10
+  )
+```
+
+### Bootstrap Analysis
+
+Perform 5000 bootstrap samples and extract r² (using `glance()`) and β̂₁/β̂₂ (using `tidy()`) from each fitted model.
+
+```{r bootstrap}
+set.seed(1)
+
+n_bootstrap = 5000
+
+bootstrap_results =
+  tibble(strap_number = 1:n_bootstrap) |>
+  mutate(
+    strap_sample = map(strap_number, \(i) slice_sample(weather_df, n = nrow(weather_df), replace = TRUE)),
+    model = map(strap_sample, \(df) lm(tmax ~ tmin + prcp, data = df)),
+    r_squared = map_dbl(model, \(m) glance(m)$r.squared),
+    tidy_results = map(model, tidy)
+  ) |>
+  select(strap_number, r_squared, tidy_results)
+
+# Extract beta1/beta2 (tmin/prcp)
+beta_ratio =
+  bootstrap_results |>
+  unnest(tidy_results) |>
+  filter(term %in% c("tmin", "prcp")) |>
+  select(strap_number, term, estimate) |>
+  pivot_wider(names_from = term, values_from = estimate) |>
+  mutate(beta_ratio = tmin / prcp)
+
+# Combine results
+bootstrap_estimates =
+  bootstrap_results |>
+  select(strap_number, r_squared) |>
+  left_join(beta_ratio |> select(strap_number, beta_ratio), by = "strap_number")
+```
+
+### Distribution of Estimates
+
+```{r bootstrap_plots}
+bootstrap_estimates |>
+  ggplot(aes(x = r_squared)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  labs(
+    title = "Distribution of R-squared from Bootstrap Samples",
+    x = "R-squared",
+    y = "Count"
+  )
+
+bootstrap_estimates |>
+  ggplot(aes(x = beta_ratio)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  labs(
+    title = expression("Distribution of " * hat(beta)[1] / hat(beta)[2] * " from Bootstrap Samples"),
+    x = expression(hat(beta)[tmin] / hat(beta)[prcp]),
+    y = "Count"
+  )
+```
+
+### 95% Confidence Intervals
+
+```{r bootstrap_ci}
+# CI for r-squared
+r_squared_ci =
+  bootstrap_estimates |>
+  summarize(
+    ci_lower = quantile(r_squared, 0.025),
+    ci_upper = quantile(r_squared, 0.975)
+  )
+
+r_squared_ci |>
+  knitr::kable(digits = 4, caption = "95% CI for R-squared")
+
+# CI for beta1/beta2
+beta_ratio_ci =
+  bootstrap_estimates |>
+  summarize(
+    ci_lower = quantile(beta_ratio, 0.025),
+    ci_upper = quantile(beta_ratio, 0.975)
+  )
+
+beta_ratio_ci |>
+  knitr::kable(digits = 4, caption = "95% CI for β̂₁/β̂₂")
+```
+
+**Interpretation:** The r² distribution is approximately symmetric and narrowly concentrated around 0.91, indicating that `tmin` and `prcp` consistently explain about 91% of the variance in `tmax` across bootstrap samples. The narrow 95% CI (0.907, 0.914) reflects the strong and stable linear relationship between these variables.
+
+The β̂₁/β̂₂ distribution shows the ratio of the `tmin` coefficient to the `prcp` coefficient. Since `prcp` consistently has a negative effect on `tmax` while `tmin` has a positive effect, the ratio is consistently negative. The distribution appears roughly symmetric around its mean.
